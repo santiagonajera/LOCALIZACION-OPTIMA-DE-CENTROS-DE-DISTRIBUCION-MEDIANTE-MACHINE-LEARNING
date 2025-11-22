@@ -1,0 +1,308 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.cluster import KMeans
+from sklearn.preprocessing import StandardScaler
+import folium
+import requests
+from io import StringIO
+from IPython.display import display, HTML
+import warnings
+warnings.filterwarnings('ignore')
+
+# =====================================================================================
+# FUNCIÓN HAVERSINE (DISTANCIA EN KM)
+# =====================================================================================
+def haversine_km(lat1, lon1, lat2, lon2):
+    """
+    Calcula distancia Haversine en km entre:
+    - un punto (lat1, lon1) y
+    - uno o muchos puntos (lat2, lon2)
+    """
+    R = 6371.0  # radio promedio de la Tierra en km
+
+    # Convertir a radianes
+    lat1_rad = np.radians(lat1)
+    lon1_rad = np.radians(lon1)
+    lat2_rad = np.radians(lat2)
+    lon2_rad = np.radians(lon2)
+
+    dlat = lat2_rad - lat1_rad
+    dlon = lon2_rad - lon1_rad
+
+    a = np.sin(dlat / 2.0) ** 2 + np.cos(lat1_rad) * np.cos(lat2_rad) * np.sin(dlon / 2.0) ** 2
+    c = 2 * np.arcsin(np.sqrt(a))
+
+    return R * c  # km
+
+# =====================================================================================
+# 1. CARGA DE DATOS DESDE GITHUB
+# =====================================================================================
+GITHUB_URL = "https://raw.githubusercontent.com/santiagonajera/LOCALIZACION-OPTIMA-DE-CENTROS-DE-DISTRIBUCION-MEDIANTE-MACHINE-LEARNING/main/coordenadas_peru_5000_puntos.txt"
+
+resp = requests.get(GITHUB_URL)
+resp.raise_for_status()
+df = pd.read_csv(StringIO(resp.text), sep="\t")
+
+print("Columnas del dataset:")
+print(df.columns.tolist())
+
+# Detectar la columna de demanda automáticamente
+demand_candidates = [c for c in df.columns if "DEMANDA" in c.upper()]
+if "DEMANDA_PALLETS_ANUAL" in df.columns:
+    DEM_COL = "DEMANDA_PALLETS_ANUAL"
+elif len(demand_candidates) == 1:
+    DEM_COL = demand_candidates[0]
+elif len(demand_candidates) > 1:
+    # Si hay varias, tomar la más "larga" (más descriptiva)
+    DEM_COL = max(demand_candidates, key=len)
+else:
+    raise ValueError("No se encontró una columna de demanda (que contenga 'DEMANDA' en el nombre).")
+
+print(f"\nColumna de demanda detectada: {DEM_COL}")
+
+print(f"\nTotal puntos de demanda: {len(df):,}")
+print(f"Demanda total: {df[DEM_COL].sum():,} pallets/año (usando columna '{DEM_COL}')")
+
+# Verificamos que existan LATITUD y LONGITUD (si no, marcamos error claro)
+for col in ["LATITUD", "LONGITUD"]:
+    if col not in df.columns:
+        raise ValueError(f"Falta la columna '{col}' en el dataset.")
+
+# =====================================================================================
+# 2. PREPARACIÓN DE DATOS Y CÁLCULO DE K ÓPTIMO (CON ESCALADO)
+# =====================================================================================
+# Variables para clustering: latitud, longitud, demanda
+X = df[["LATITUD", "LONGITUD", DEM_COL]].values
+
+# Escalado con StandardScaler
+scaler = StandardScaler()
+X_scaled = scaler.fit_transform(X)
+
+# Dar más peso a la demanda
+X_scaled[:, 2] *= 2
+
+# Método del codo
+inercias = []
+k_range = range(2, 21)
+for k in k_range:
+    kmeans = KMeans(n_clusters=k, random_state=42, n_init=10)
+    kmeans.fit(X_scaled)
+    inercias.append(kmeans.inertia_)
+
+# Segunda derivada de la inercia para encontrar el "codo"
+d1 = np.diff(inercias)
+d2 = np.diff(d1)
+k_optimo = int(np.argmax(d2) + 3)  # offset por derivadas
+k_sugerido = min(max(k_optimo, 4), 8)  # limitar entre 4 y 8 CDs
+
+print(f"\nK óptimo matemático: {k_optimo}")
+print(f"K sugerido (ajustado): {k_sugerido}")
+
+# Gráfico del codo
+plt.figure(figsize=(6, 4))
+plt.plot(list(k_range), inercias, "o-")
+plt.axvline(k_sugerido, color="r", linestyle="--", label=f"K sugerido = {k_sugerido}")
+plt.xlabel("K")
+plt.ylabel("Inercia")
+plt.title("Método del codo")
+plt.legend()
+plt.grid(True, alpha=0.3)
+plt.show()
+
+# =====================================================================================
+# 3. K-MEANS FINAL Y CENTROS DE DISTRIBUCIÓN (USANDO ESCALADO)
+# =====================================================================================
+kmeans_final = KMeans(n_clusters=k_sugerido, random_state=42, n_init=20)
+df["CLUSTER"] = kmeans_final.fit_predict(X_scaled)
+
+# Centros del cluster en espacio escalado → devolver a escala original
+centros_scaled = kmeans_final.cluster_centers_
+centros_originales = scaler.inverse_transform(centros_scaled)
+
+nombres_centros = []
+coordenadas_centros = []
+
+for i in range(k_sugerido):
+    cluster_data = df[df["CLUSTER"] == i]
+
+    # Distancias Haversine entre el centro del cluster y los puntos del cluster
+    dist = haversine_km(
+        centros_originales[i, 0],
+        centros_originales[i, 1],
+        cluster_data["LATITUD"].values,
+        cluster_data["LONGITUD"].values
+    )
+
+    idx_min = dist.argmin()
+    loc_centro = cluster_data.iloc[idx_min]
+
+    nombres_centros.append(loc_centro["CIUDAD_BASE"])
+    coordenadas_centros.append([loc_centro["LATITUD"], loc_centro["LONGITUD"]])
+
+# =====================================================================================
+# 4. RESUMEN POR CD (df_resultados) – DISTANCIAS HAVERSINE
+# =====================================================================================
+resultados_clusters = []
+for i in range(k_sugerido):
+    cluster_data = df[df["CLUSTER"] == i]
+    demanda_total = cluster_data[DEM_COL].sum()
+    num_localidades = len(cluster_data)
+
+    # Distancias Haversine centro → localidades del cluster
+    distancias = haversine_km(
+        coordenadas_centros[i][0],
+        coordenadas_centros[i][1],
+        cluster_data["LATITUD"].values,
+        cluster_data["LONGITUD"].values
+    )
+    distancia_promedio = distancias.mean()
+    distancia_maxima = distancias.max()
+
+    resultados_clusters.append({
+        "Cluster": i + 1,
+        "Centro": nombres_centros[i],
+        "Localidades": num_localidades,
+        "Demanda_Total": demanda_total,
+        "Demanda_Promedio": demanda_total / num_localidades,
+        "Dist_Promedio_km": distancia_promedio,
+        "Dist_Maxima_km": distancia_maxima,
+        "Latitud": coordenadas_centros[i][0],
+        "Longitud": coordenadas_centros[i][1]
+    })
+
+df_resultados = pd.DataFrame(resultados_clusters)
+
+print("\nRESUMEN DE CENTROS DE DISTRIBUCIÓN (df_resultados):")
+display(df_resultados)
+
+# =====================================================================================
+# 5. TABLA "QUIÉN ATIENDE A QUIÉN" (df_asignaciones) – DISTANCIA HAVERSINE
+# =====================================================================================
+df_asignaciones = df[[
+    "LOCALIDAD", "CIUDAD_BASE", "LATITUD", "LONGITUD",
+    DEM_COL, "TIPO_LOCALIDAD", "REGION",
+    "ZONA_GEOGRAFICA", "CLUSTER"
+]].copy()
+
+df_asignaciones.rename(columns={DEM_COL: "DEMANDA"}, inplace=True)
+
+df_asignaciones["CD_ASIGNADO"] = df_asignaciones["CLUSTER"].apply(
+    lambda x: f"CD #{x+1}"
+)
+df_asignaciones["CENTRO_DISTRIBUCION"] = df_asignaciones["CLUSTER"].apply(
+    lambda x: nombres_centros[x]
+)
+df_asignaciones["COORD_CD"] = df_asignaciones["CLUSTER"].apply(
+    lambda x: f"{coordenadas_centros[x][0]:.6f}, {coordenadas_centros[x][1]:.6f}"
+)
+
+# Distancia Haversine de cada localidad a su CD
+distancias_cd = []
+for _, row in df_asignaciones.iterrows():
+    cl = row["CLUSTER"]
+    d = haversine_km(
+        row["LATITUD"],
+        row["LONGITUD"],
+        coordenadas_centros[cl][0],
+        coordenadas_centros[cl][1]
+    )
+    distancias_cd.append(d)
+
+df_asignaciones["DISTANCIA_CD_KM"] = distancias_cd
+df_asignaciones = df_asignaciones.sort_values(
+    ["CLUSTER", "DEMANDA"],
+    ascending=[True, False]
+)
+
+print("\nASIGNACIONES (df_asignaciones.head(10)):")
+display(df_asignaciones.head(10))
+
+# =====================================================================================
+# 6. MAPA FOLIUM: CLIENTES + CENTROS + ASIGNACIÓN (SE MUESTRA DIRECTO)
+# =====================================================================================
+lat_centro = df["LATITUD"].mean()
+lon_centro = df["LONGITUD"].mean()
+
+mapa = folium.Map(location=[lat_centro, lon_centro], zoom_start=6, tiles="OpenStreetMap")
+
+colores = ["red", "blue", "green", "purple", "orange", "darkred", "lightred", "beige"]
+
+# Centros de distribución (marcadores)
+for i in range(k_sugerido):
+    lat_cd, lon_cd = coordenadas_centros[i]
+    nombre_cd = nombres_centros[i]
+
+    popup_cd = folium.Popup(
+        f"CD #{i+1}<br>{nombre_cd}<br>({lat_cd:.4f}, {lon_cd:.4f})",
+        max_width=250
+    )
+
+    folium.Marker(
+        location=[lat_cd, lon_cd],
+        popup=popup_cd,
+        icon=folium.Icon(color=colores[i], icon="home", prefix="fa"),
+        tooltip=f"CD #{i+1} - {nombre_cd}"
+    ).add_to(mapa)
+
+# Clientes (todas las localidades)
+for _, row in df_asignaciones.iterrows():
+    cl = row["CLUSTER"]
+    lat = row["LATITUD"]
+    lon = row["LONGITUD"]
+    cd_name = row["CENTRO_DISTRIBUCION"]
+    cd_label = row["CD_ASIGNADO"]
+    demanda = row["DEMANDA"]
+    dist_km = row["DISTANCIA_CD_KM"]
+
+    # tamaño del punto según demanda
+    if demanda >= 5000:
+        r = 7
+    elif demanda >= 1000:
+        r = 5
+    else:
+        r = 3
+
+    popup_cliente = folium.Popup(
+        f"<b>{row['LOCALIDAD']}</b><br>"
+        f"Ciudad base: {row['CIUDAD_BASE']}<br>"
+        f"Demanda: {demanda:,.0f} pallets/año<br>"
+        f"Atendido por: {cd_label} ({cd_name})<br>"
+        f"Distancia aprox: {dist_km:.1f} km",
+        max_width=250
+    )
+
+    folium.CircleMarker(
+        location=[lat, lon],
+        radius=r,
+        color=colores[cl],
+        fill=True,
+        fill_color=colores[cl],
+        fill_opacity=0.6,
+        popup=popup_cliente,
+        weight=1
+    ).add_to(mapa)
+
+# Leyenda HTML
+leyenda_html = """
+<div style="position: fixed;
+     bottom: 10px; left: 10px; width: 260px; height: auto;
+     background-color: white; z-index:9999; font-size:13px;
+     border:2px solid grey; border-radius: 5px; padding: 10px">
+     <b>Centros de Distribución (CD)</b><br>
+     <i>Color = cluster / CD</i><br><br>
+"""
+for i in range(k_sugerido):
+    leyenda_html += f"CD #{i+1} - {nombres_centros[i]}<br>"
+leyenda_html += "</div>"
+
+mapa.get_root().html.add_child(folium.Element(leyenda_html))
+
+# Mostrar mapa directamente en Colab
+display(HTML(mapa._repr_html_()))
+
+print("\nObjetos clave en memoria:")
+print(" - DEM_COL           → nombre real de la columna de demanda usada")
+print(" - df_resultados     → resumen por CD")
+print(" - df_asignaciones   → quién atiende a quién + distancia")
+print(" - mapa              → mapa Folium interactivo")
