@@ -1,0 +1,132 @@
+Quiero que generes un único script en Python, listo para ejecutarse en Google Colab, que haga lo siguiente de principio a fin, TODO en una sola celda:
+
+1. Importe las librerías necesarias:
+   - pandas, numpy
+   - matplotlib.pyplot
+   - sklearn.cluster.KMeans
+   - sklearn.preprocessing.StandardScaler
+   - scipy.spatial.distance (si no la usas al final, no la importes)
+   - folium
+   - requests, io.StringIO
+   - IPython.display (display, HTML)
+   - warnings (y desactive warnings)
+
+2. Defina una función `haversine_km(lat1, lon1, lat2, lon2)` que calcule la distancia Haversine en kilómetros entre:
+   - un punto (lat1, lon1)
+   - uno o muchos puntos (lat2, lon2)
+   Usar radio de la Tierra R = 6371 km, convertir grados a radianes y aplicar la fórmula estándar de Haversine. La función debe devolver la distancia en km (como escalar o array de numpy, según el input).
+
+3. Cargue un dataset desde GitHub usando `requests` y `StringIO`:
+   - URL: "https://raw.githubusercontent.com/santiagonajera/LOCALIZACION-OPTIMA-DE-CENTROS-DE-DISTRIBUCION-MEDIANTE-MACHINE-LEARNING/main/coordenadas_peru_5000_puntos.txt"
+   - Leerlo con `pandas.read_csv(..., sep="\t")`.
+   - Imprimir en pantalla el número total de puntos de demanda y la demanda total anual.
+
+4. Prepare los datos para clustering usando las columnas:
+   - LATITUD
+   - LONGITUD
+   - DEMANDA_PALLETS_ANUAL
+
+   Aplicar:
+   - `StandardScaler()` sobre estas tres columnas.
+   - Una vez escalado el array, multiplicar la columna de demanda (índice 2) por 2, para darle más peso en el clustering.
+
+5. Calcular el número óptimo de clusters K usando el método del codo:
+   - Probar K en el rango de 2 a 20.
+   - Para cada K, ajustar un KMeans con `random_state=42`, `n_init=10` y guardar la inercia.
+   - Calcular la primera y segunda derivada de la lista de inercias.
+   - Tomar el K óptimo matemático como `argmax` de la segunda derivada + 3 (por los offsets de derivadas).
+   - Definir un K sugerido ajustado para uso logístico, limitando entre 4 y 8: `k_sugerido = min(max(k_optimo, 4), 8)`.
+   - Imprimir en pantalla el K óptimo matemático y el K sugerido.
+
+6. Graficar el método del codo:
+   - Usar matplotlib.
+   - Eje X: valores de K probados.
+   - Eje Y: inercia.
+   - Dibujar una línea vertical en K sugerido.
+   - Mostrar la figura con `plt.show()` (NO guardar en archivo).
+
+7. Ejecutar KMeans final con `n_clusters=k_sugerido`, `random_state=42`, `n_init=20` sobre los datos escalados:
+   - Añadir la columna `CLUSTER` al DataFrame original con la asignación de cada punto.
+
+8. Obtener los centros de los clusters:
+   - Tomar `kmeans_final.cluster_centers_` (en espacio escalado) y desescalar con `scaler.inverse_transform`.
+   - Para cada cluster i:
+     - Filtrar las filas del DataFrame con `CLUSTER == i`.
+     - Calcular la distancia Haversine (en km) entre el centro (lat, lon desescalados) y todas las localidades de ese cluster usando la función `haversine_km`.
+     - Elegir como centro de distribución la localidad más cercana al centro (mínima distancia Haversine).
+     - Guardar:
+       - Nombre del centro (columna `CIUDAD_BASE`).
+       - Coordenadas del centro (LATITUD, LONGITUD).
+
+9. Crear un DataFrame `df_resultados` que resuma cada centro de distribución con las columnas:
+   - Cluster (1, 2, 3, …)
+   - Centro (nombre de la ciudad base)
+   - Localidades (cantidad de puntos en ese cluster)
+   - Demanda_Total (suma de DEMANDA_PALLETS_ANUAL del cluster)
+   - Demanda_Promedio (Demanda_Total / Localidades)
+   - Dist_Promedio_km (distancia Haversine promedio centro–localidades)
+   - Dist_Maxima_km (distancia Haversine máxima centro–localidades)
+   - Latitud (del centro elegido)
+   - Longitud (del centro elegido)
+
+   Importante: las distancias promedio y máxima deben calcularse SIEMPRE con la función Haversine en km, NO con aproximaciones tipo grados * 111.
+
+   Mostrar `df_resultados` con `display(df_resultados)`.
+
+10. Crear un DataFrame `df_asignaciones` que responda “quién atiende a quién” para cada localidad:
+    - Partir de las columnas: LOCALIDAD, CIUDAD_BASE, LATITUD, LONGITUD, DEMANDA_PALLETS_ANUAL, TIPO_LOCALIDAD, REGION, ZONA_GEOGRAFICA, CLUSTER.
+    - Agregar:
+      - `CD_ASIGNADO` = "CD #i" donde i = CLUSTER + 1.
+      - `CENTRO_DISTRIBUCION` = nombre de la ciudad base seleccionada como centro para ese cluster.
+      - `COORD_CD` = string "lat, lon" del centro con 6 decimales.
+      - `DISTANCIA_CD_KM` = distancia Haversine en km entre la localidad y el centro de su cluster usando `haversine_km`.
+    - Ordenar `df_asignaciones` por CLUSTER y DEMANDA_PALLETS_ANUAL (descendente).
+    - Mostrar en pantalla `df_asignaciones.head(10)` con `display`.
+
+11. Crear un mapa interactivo con Folium que muestre:
+    - El centro del mapa como el promedio de LATITUD y LONGITUD de todos los puntos.
+    - Un mapa base `folium.Map(location=[lat_centro, lon_centro], zoom_start=6, tiles="OpenStreetMap")`.
+
+    a) Para cada centro de distribución:
+       - Añadir un `folium.Marker` con:
+         - Ubicación = coordenadas del centro.
+         - Popup con:
+           - "CD #i"
+           - Nombre del centro (ciudad base).
+           - Coordenadas con 4 decimales.
+         - Icono de casa (`icon="home"`, `prefix="fa"`) y un color diferente por cluster (por ejemplo, lista de colores: ["red", "blue", "green", "purple", "orange", "darkred", "lightred", "beige"]).
+
+    b) Para cada localidad:
+       - Añadir un `folium.CircleMarker` con:
+         - Ubicación = LATITUD, LONGITUD.
+         - Color y fill_color = color del cluster correspondiente.
+         - Radio del círculo según DEMANDA_PALLETS_ANUAL:
+           - >= 5000 → radio 7
+           - >= 1000 → radio 5
+           - < 1000 → radio 3
+         - Popup con:
+           - LOCALIDAD
+           - CIUDAD_BASE
+           - DEMANDA_PALLETS_ANUAL (formateada con separador de miles)
+           - CD asignado ("CD #i" y nombre del centro)
+           - Distancia aproximada al CD en km, con 1 decimal (DISTANCIA_CD_KM).
+
+    c) Añadir una leyenda HTML fija (div en la esquina inferior izquierda) que liste:
+       - “Centros de Distribución (CD)”
+       - Texto: “Color = cluster / CD”
+       - Una línea por cada CD: "CD #i - nombre de la ciudad base".
+
+12. Mostrar el mapa directamente en Colab sin guardar archivo HTML:
+    - Usar `display(HTML(mapa._repr_html_()))` al final.
+    - NO guardar nada en disco (`.save()`, `.to_csv()`, `.savefig()`, etc. no deben usarse).
+
+13. El código debe estar todo en una sola celda y, al ejecutarse en Colab, debe:
+    - Imprimir los mensajes básicos (total de puntos, demanda, K óptimo y sugerido).
+    - Mostrar el gráfico del codo.
+    - Mostrar `df_resultados`.
+    - Mostrar `df_asignaciones.head(10)`.
+    - Mostrar el mapa Folium interactivo al final.
+
+IMPORTANTE:
+- No escribas explicaciones largas, ni texto adicional fuera de los prints del propio script.
+- Entrega ÚNICAMENTE el código Python completo, listo para pegar en una celda de Google Colab.
